@@ -1,0 +1,12 @@
+# 虚拟环境
+.venv/
+
+# 操作系统文件
+.DS_Store
+
+# 生成的Excel文件
+*_updated.xlsx
+
+# 缓存文件
+__pycache__/
+*.pyc
