@@ -50,6 +50,63 @@ def is_gibberish(text):
     
     return False
 
+def extract_images_from_docx(docx_path):
+    """从docx文件中提取图片"""
+    import zipfile
+    import io
+    images = []
+    
+    try:
+        with zipfile.ZipFile(docx_path, 'r') as zip_ref:
+            # 遍历zip中的所有文件
+            for file_info in zip_ref.infolist():
+                if file_info.filename.startswith('word/media/'):
+                    # 读取图片数据
+                    with zip_ref.open(file_info.filename) as f:
+                        image_data = f.read()
+                        # 提取图片特征
+                        image_feature = extract_image_features(image_data)
+                        images.append(image_feature)
+    except Exception as e:
+        # 打印异常信息以便调试
+        print(f"提取图片时出错: {e}")
+    
+    return images
+
+def extract_image_features(image_data):
+    """提取图片特征"""
+    # 简单的图片特征提取
+    # 1. 图片大小
+    size = len(image_data)
+    # 2. 颜色分布（通过简单的统计）
+    # 对于JPEG图片，前几个字节是固定的，我们可以统计后面的字节分布
+    if size > 10:
+        # 统计前100个字节的分布
+        byte_counts = {}  # 暂时使用空字典，实际可以统计字节频率
+    else:
+        byte_counts = {}
+    
+    # 返回特征向量
+    return {"size": size, "byte_counts": byte_counts}
+
+def compute_image_similarity(img1_features, img2_features):
+    """计算图片相似度"""
+    # 基于图片大小的相似度
+    size1 = img1_features.get("size", 0)
+    size2 = img2_features.get("size", 0)
+    
+    if size1 == 0 or size2 == 0:
+        return 0.0
+    
+    # 大小相似度（1 - 绝对差/较大值）
+    size_similarity = 1.0 - abs(size1 - size2) / max(size1, size2)
+    
+    return size_similarity
+
+def compute_combined_similarity(text_similarity, image_similarity, text_weight=0.8, image_weight=0.2):
+    """计算文本和图片的综合相似度"""
+    return text_similarity * text_weight + image_similarity * image_weight
+
 def read_word_doc(file_path):
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -131,7 +188,21 @@ def extract_student_answers(folder_path):
         file_path = os.path.join(folder_path, doc_file)
         student_id, name = extract_student_info_from_filename(doc_file)
         content = read_word_doc(file_path)
-        results.append((student_id, name, content))
+        # 提取图片
+        images = []
+        if file_path.endswith('.docx'):
+            images = extract_images_from_docx(file_path)
+        else:
+            # 对于.doc文件，直接检查文件内容是否包含图片
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    file_content = f.read()
+                # 检查是否包含Word图片标签或base64编码的图片
+                if any(tag in file_content for tag in ['<w:binData>', '<v:imagedata>', '/9j/', 'iVBOR']):
+                    images = [{'size': 1, 'byte_counts': {}}]  # 标记有图片
+            except Exception:
+                pass
+        results.append((student_id, name, content, images))
     
     return results
 
@@ -187,10 +258,14 @@ def cosine_similarity(vec1, vec2):
 def compute_similarity_matrix(results):
     """计算所有学生答案的相似度矩阵"""
     documents = []
-    for student_id, name, content in results:
+    all_images = []
+    
+    for student_id, name, content, images in results:
         words = tokenize(content)
         documents.append(words)
+        all_images.append(images)
     
+    # 计算文本相似度
     idf = compute_idf(documents)
     
     tfidf_vectors = []
@@ -203,9 +278,36 @@ def compute_similarity_matrix(results):
     
     for i in range(n):
         for j in range(i + 1, n):
-            sim = cosine_similarity(tfidf_vectors[i], tfidf_vectors[j])
-            similarity_matrix[i][j] = sim
-            similarity_matrix[j][i] = sim
+            # 计算文本相似度
+            text_sim = cosine_similarity(tfidf_vectors[i], tfidf_vectors[j])
+
+            # 计算图片相似度
+            # 情况1：两个文档都有图片，计算图片相似度
+            # 情况2：只有一个文档有图片，图片相似度为0%（表示完全不同）
+            # 情况3：两个文档都没有图片，图片相似度为100%（不影响综合相似度）
+            if all_images[i] and all_images[j]:
+                # 计算所有图片对的相似度，取平均值
+                image_sims = []
+                for img1 in all_images[i]:
+                    for img2 in all_images[j]:
+                        img_sim = compute_image_similarity(img1, img2)
+                        image_sims.append(img_sim)
+                if image_sims:
+                    image_sim = sum(image_sims) / len(image_sims)
+                else:
+                    image_sim = 1.0
+            elif all_images[i] or all_images[j]:
+                # 只有一个文档有图片，图片相似度为0%
+                image_sim = 0.0
+            else:
+                # 两个文档都没有图片，图片相似度设为100%
+                image_sim = 1.0
+
+            # 计算综合相似度
+            combined_sim = compute_combined_similarity(text_sim, image_sim)
+
+            similarity_matrix[i][j] = combined_sim
+            similarity_matrix[j][i] = combined_sim
     
     for i in range(n):
         similarity_matrix[i][i] = 1.0
@@ -316,12 +418,59 @@ def analyze_similarity(results, folder_path):
         print("学生数量不足，无法进行相似度分析")
         return
     
-    print("正在计算语义向量...")
+    # 统计字数和图片信息
+    word_counts = []
+    students_with_images = 0
+    for student_id, name, content, images in results:
+        word_count = len(content)
+        word_counts.append(word_count)
+        
+        # 检查是否包含图片（三种方式）
+        # 1. 从docx文件中提取的图片
+        if images:
+            students_with_images += 1
+        # 2. 检查文档内容中是否包含Word图片标签
+        elif any(tag in content for tag in ['<w:binData>', '<v:imagedata>']):
+            students_with_images += 1
+        # 3. 检查文档内容中是否包含base64编码的图片
+        elif any(marker in content for marker in ['/9j/', 'iVBOR']):
+            students_with_images += 1
+    
+    # 计算字数分布区间
+    min_words = min(word_counts)
+    max_words = max(word_counts)
+    avg_words = sum(word_counts) / len(word_counts)
+    
+    # 将字数分为5个区间
+    word_ranges = []
+    range_size = (max_words - min_words) / 5 if max_words > min_words else 1
+    for i in range(5):
+        range_start = min_words + i * range_size
+        range_end = min_words + (i + 1) * range_size
+        count = sum(1 for wc in word_counts if range_start <= wc < range_end)
+        if i == 4:  # 最后一个区间包含最大值
+            count = sum(1 for wc in word_counts if range_start <= wc <= range_end)
+        word_ranges.append((int(range_start), int(range_end), count))
+    
+    print("\n" + "=" * 65)
+    print("字数统计信息")
+    print("=" * 65)
+    print(f"总人数: {len(results)}")
+    print(f"最少字数: {min_words}")
+    print(f"最多字数: {max_words}")
+    print(f"平均字数: {avg_words:.1f}")
+    print(f"有图片的人数: {students_with_images}")
+    print("\n字数分布区间:")
+    for i, (start, end, count) in enumerate(word_ranges, 1):
+        print(f"  区间 {i}: {start} - {end} 字: {count} 人")
+    print("=" * 65)
+    
+    print("\n正在计算语义向量...")
     similarity_matrix = compute_similarity_matrix(results)
     
     print("正在计算平均相似度...")
     avg_similarities = []
-    for i, (student_id, name, content) in enumerate(results):
+    for i, (student_id, name, content, images) in enumerate(results):
         avg_sim = compute_average_similarity(similarity_matrix, i)
         avg_similarities.append((student_id, name, avg_sim))
     
@@ -352,6 +501,40 @@ def analyze_similarity(results, folder_path):
             update_excel_scores(excel_file, student_scores)
     else:
         print("\n未找到Excel文件")
+    
+    # 最后打印统计信息
+    print("\n" + "=" * 65)
+    print("统计信息汇总")
+    print("=" * 65)
+    print(f"总人数: {len(results)}")
+    print(f"最少字数: {min_words}")
+    print(f"最多字数: {max_words}")
+    print(f"平均字数: {avg_words:.1f}")
+    print(f"有图片的人数: {students_with_images}")
+    print("\n字数分布区间:")
+    for i, (start, end, count) in enumerate(word_ranges, 1):
+        print(f"  区间 {i}: {start} - {end} 字: {count} 人")
+    print("=" * 65)
+    
+    # 将汇总信息写入文件
+    folder_name = os.path.basename(folder_path)
+    summary_file = os.path.join(folder_path, f"summary_{folder_name}.txt")
+    
+    with open(summary_file, 'w', encoding='utf-8') as f:
+        f.write("=" * 65 + "\n")
+        f.write("统计信息汇总\n")
+        f.write("=" * 65 + "\n")
+        f.write(f"总人数: {len(results)}\n")
+        f.write(f"最少字数: {min_words}\n")
+        f.write(f"最多字数: {max_words}\n")
+        f.write(f"平均字数: {avg_words:.1f}\n")
+        f.write(f"有图片的人数: {students_with_images}\n")
+        f.write("\n字数分布区间:\n")
+        for i, (start, end, count) in enumerate(word_ranges, 1):
+            f.write(f"  区间 {i}: {start} - {end} 字: {count} 人\n")
+        f.write("=" * 65 + "\n")
+    
+    print(f"\n汇总信息已保存到: {summary_file}")
     
     return avg_similarities
 
