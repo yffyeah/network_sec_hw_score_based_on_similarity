@@ -7,6 +7,7 @@ import jieba
 import math
 import csv
 import xlrd
+import xlwt
 import openpyxl
 from collections import Counter
 
@@ -352,10 +353,48 @@ def update_excel_scores(excel_file, student_scores):
             return False
         
         # 创建新的工作簿
+        new_workbook = xlwt.Workbook(encoding='utf-8')
+        new_sheet = new_workbook.add_sheet(sheet.name)
+        
+        # 查找状态列
+        status_col = -1
+        for row in range(min(3, sheet.nrows)):
+            if status_col != -1:
+                break
+            for col in range(sheet.ncols):
+                header = str(sheet.cell_value(row, col)).strip()
+                if '状态' in header or '提交状态' in header:
+                    status_col = col
+                    break
+        
+        # 复制原有数据，跳过状态为"未交"的行
+        new_row_idx = 0
+        updated_count = 0
+        for row in range(sheet.nrows):
+            # 检查是否为"未交"状态（跳过表头行）
+            if row > 0 and status_col != -1:
+                status_value = str(sheet.cell_value(row, status_col)).strip()
+                if '未交' in status_value:
+                    continue  # 跳过"未交"的行
+            
+            # 复制该行数据
+            for col in range(sheet.ncols):
+                cell_value = sheet.cell_value(row, col)
+                new_sheet.write(new_row_idx, col, cell_value)
+            
+            # 更新分数（跳过表头行）
+            if row > 0:
+                student_id = str(sheet.cell_value(row, id_col)).strip()
+                if student_id in student_scores:
+                    new_sheet.write(new_row_idx, score_col, student_scores[student_id])
+                    updated_count += 1
+            
+            new_row_idx += 1
+        
         output_file = excel_file.replace('.xls', '_updated.xls')
-        # 注意：xlrd只能读，不能写，这里需要使用其他库
-        print("提示：.xls文件暂不支持直接修改，建议使用.xlsx文件")
-        return False
+        new_workbook.save(output_file)
+        print(f"已更新 {updated_count} 个学生的分数到: {output_file}")
+        return True
     
     elif excel_file.endswith('.xlsx'):
         workbook = openpyxl.load_workbook(excel_file)
@@ -378,16 +417,49 @@ def update_excel_scores(excel_file, student_scores):
             print("未找到学号或分数列")
             return False
         
-        # 更新分数
-        updated_count = 0
-        for row in range(2, sheet.max_row + 1):
-            student_id = str(sheet.cell(row=row, column=id_col).value).strip()
-            if student_id in student_scores:
-                sheet.cell(row=row, column=score_col, value=student_scores[student_id])
-                updated_count += 1
+        # 查找状态列
+        status_col = -1
+        for row in range(1, min(4, sheet.max_row + 1)):
+            if status_col != -1:
+                break
+            for col in range(1, sheet.max_column + 1):
+                header = str(sheet.cell(row=row, column=col).value).strip()
+                if '状态' in header or '提交状态' in header:
+                    status_col = col
+                    break
         
-        output_file = excel_file.replace('.xlsx', '_updated.xlsx')
-        workbook.save(output_file)
+        # 创建新的工作簿（使用xlwt保存为.xls格式）
+        new_workbook = xlwt.Workbook(encoding='utf-8')
+        new_sheet = new_workbook.add_sheet('Sheet1')
+        
+        # 复制原有数据，跳过状态为"未交"的行，并更新分数
+        new_row_idx = 0
+        updated_count = 0
+        for row in range(1, sheet.max_row + 1):
+            # 检查是否为"未交"状态（跳过表头行）
+            if row > 1 and status_col != -1:
+                status_value = str(sheet.cell(row=row, column=status_col).value).strip()
+                if '未交' in status_value:
+                    continue  # 跳过"未交"的行
+            
+            # 复制该行数据
+            for col in range(1, sheet.max_column + 1):
+                # 如果是分数列且需要更新，则使用新分数
+                if col == score_col and row > 1:
+                    student_id = str(sheet.cell(row=row, column=id_col).value).strip()
+                    if student_id in student_scores:
+                        new_sheet.write(new_row_idx, col - 1, student_scores[student_id])
+                        updated_count += 1
+                        continue
+                
+                cell_value = sheet.cell(row=row, column=col).value
+                if cell_value is not None:
+                    new_sheet.write(new_row_idx, col - 1, cell_value)
+            
+            new_row_idx += 1
+        
+        output_file = excel_file.replace('.xlsx', '_updated.xls')
+        new_workbook.save(output_file)
         print(f"已更新 {updated_count} 个学生的分数到: {output_file}")
         return True
     
@@ -494,10 +566,20 @@ def analyze_similarity(results, folder_path):
     
     # 查找并更新Excel文件
     excel_files = find_excel_file(folder_path)
+    chapter_name = ""
     if excel_files:
         print("\n找到Excel文件:")
         for excel_file in excel_files:
             print(f"- {os.path.basename(excel_file)}")
+            # 从Excel文件名中提取章节名称
+            excel_basename = os.path.basename(excel_file)
+            # 移除扩展名
+            excel_name_without_ext = os.path.splitext(excel_basename)[0]
+            # 移除班级名称（如"23-3"）
+            import re
+            chapter_match = re.match(r'(.+?)(?:\d{2}-\d+)?$', excel_name_without_ext)
+            if chapter_match:
+                chapter_name = chapter_match.group(1).strip()
             update_excel_scores(excel_file, student_scores)
     else:
         print("\n未找到Excel文件")
@@ -518,7 +600,10 @@ def analyze_similarity(results, folder_path):
     
     # 将汇总信息写入文件
     folder_name = os.path.basename(folder_path)
-    summary_file = os.path.join(folder_path, f"summary_{folder_name}.txt")
+    if chapter_name:
+        summary_file = os.path.join(folder_path, f"summary_{chapter_name}_{folder_name}.txt")
+    else:
+        summary_file = os.path.join(folder_path, f"summary_{folder_name}.txt")
     
     with open(summary_file, 'w', encoding='utf-8') as f:
         f.write("=" * 65 + "\n")
