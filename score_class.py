@@ -472,7 +472,7 @@ def compute_score_by_similarity(avg_sim, min_sim, max_sim):
     
     diff = max_sim - min_sim
     
-    normal_distribution_ratios = [0.067, 0.159, 0.309, 0.691, 0.841, 0.933] 
+    normal_distribution_ratios = [0.067, 0.159, 0.5, 0.841, 0.933, 1.0] 
     
     normalized = (avg_sim - min_sim) / diff
     
