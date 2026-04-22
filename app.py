@@ -332,5 +332,21 @@ def download_filled():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/download_template')
+def download_template():
+    try:
+        template_path = os.path.join('static', '作业模板.doc')
+        if not os.path.exists(template_path):
+            return jsonify({'error': '模板文件不存在'}), 404
+        
+        return send_from_directory(
+            'static',
+            '作业模板.doc',
+            as_attachment=True,
+            download_name='作业模板.doc'
+        )
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    app.run(host='0.0.0.0', port=7070, debug=False)
